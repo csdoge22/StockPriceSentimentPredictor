@@ -1,0 +1,22 @@
+# Web framework
+fastapi>=0.100.0
+uvicorn[standard]==0.23.2
+
+# HTTP requests
+requests==2.32.4
+python-dotenv==1.0.0
+
+# Machine learning
+scikit-learn==1.3.2
+joblib==1.3.2
+pandas==2.1.1
+
+# Data validation
+pydantic==2.5.1
+
+# SQLite caching (built-in, no extra library needed)
+# Optional if using more advanced caching
+# redis==6.4.0
+
+# Testing (optional)
+pytest==8.4.0
