@@ -3,17 +3,52 @@ import os
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
+import logging
+from model import StockPriceSentimentPredictor
+
+# ------------------------
+# Config & Initialization
+# ------------------------
+load_dotenv()
 
 DB_FILE = "cache.db"
 CACHE_TTL = timedelta(minutes=15)
+MODEL_TYPE = "SVC"
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
+# CORS settings
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize the sentiment predictor
+predictor = StockPriceSentimentPredictor(model_type=MODEL_TYPE)
+if predictor.model is None or predictor.vectorizer is None or predictor.encoder is None:
+    logging.info("Training sentiment model from dataset...")
+    data = predictor.fetch_dataset()
+    X, y = predictor.preprocess_data(data)
+    predictor.train(X, y)
+else:
+    logging.info("Loaded existing sentiment model artifacts.")
+
 # ------------------------
-# Initialize DB tables if not exist
+# DB Initialization
 # ------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -95,58 +130,101 @@ def db_set_news(symbol: str, data: List[dict]):
     conn.close()
 
 # ------------------------
-# Dummy ML Sentiment Function
-# ------------------------
-def run_sentiment(headlines: List[str]) -> List[str]:
-    # Placeholder logic: classify each headline
-    sentiments = []
-    for h in headlines:
-        if "bad" in h.lower():
-            sentiments.append("negative")
-        elif "good" in h.lower():
-            sentiments.append("positive")
-        else:
-            sentiments.append("neutral")
-    return sentiments
-
-# ------------------------
 # API Endpoints
 # ------------------------
 @app.get("/stock/{symbol}")
-def get_stock(symbol: str):
-    # 1. Try cache
+def get_stock(
+    symbol: str,
+    sentiment: str = Query("all", regex="^(all|positive|negative|neutral)$")
+):
+    """Return stock info and news with sentiment and actual published date."""
+    # Try cache
     cached_stock = db_get(symbol)
     cached_news = db_get_news(symbol)
 
-    if cached_stock and cached_news:
-        return {"symbol": symbol, "data": {"stock_info": cached_stock, "news": cached_news}}
+    if cached_stock is None or cached_news is None:
+        logging.info(f"CACHE MISS: Fetching fresh data for {symbol}")
 
-    # 2. Fetch stock info
-    # Replace YOUR_ALPHA_VANTAGE_KEY with real key in production
-    AV_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={AV_KEY}"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    js = resp.json()["Global Quote"]
-    current = float(js["05. price"])
-    prev = float(js["08. previous close"])
-    stock_data = {"current_price": current, "previous_close": prev, "timestamp": datetime.now(timezone.utc).isoformat()}
-    db_set(symbol, stock_data)
+        # Fetch stock info
+        AV_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
+        if not AV_KEY:
+            raise RuntimeError("Missing ALPHA_VANTAGE_KEY in environment")
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={AV_KEY}"
+        resp = requests.get(url)
+        resp.raise_for_status()
+        js = resp.json()
+        if "Global Quote" not in js or not js["Global Quote"]:
+            return {"error": f"No stock data available for {symbol}", "raw_response": js}
 
-    # 3. Fetch news
-    # Replace YOUR_NEWSAPI_KEY with real key in production
-    NEWS_KEY = os.environ.get("NEWSAPI_KEY", "demo")
-    news_url = f"https://newsapi.org/v2/everything?q={symbol}&apiKey={NEWS_KEY}"
-    news_resp = requests.get(news_url)
-    news_resp.raise_for_status()
-    articles = news_resp.json().get("articles", [])
-    news_list = [{"title": a["title"], "description": a.get("description", ""), "fetched_at": datetime.now(timezone.utc).isoformat()} for a in articles]
-    db_set_news(symbol, news_list)
+        quote = js["Global Quote"]
+        try:
+            current = float(quote["05. price"])
+            prev = float(quote["08. previous close"])
+        except (KeyError, ValueError):
+            return {"error": f"Unexpected data format for {symbol}", "raw_response": js}
 
-    return {"symbol": symbol, "data": {"stock_info": stock_data, "news": news_list}}
+        cached_stock = {
+            "current_price": current,
+            "previous_close": prev,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        db_set(symbol, cached_stock)
+
+        # Fetch news
+        NEWS_KEY = os.environ.get("NEWS_API_KEY")
+        if not NEWS_KEY:
+            raise RuntimeError("Missing NEWS_API_KEY in environment")
+        news_url = f"https://newsapi.org/v2/everything?q={symbol}&apiKey={NEWS_KEY}"
+        news_resp = requests.get(news_url)
+        news_resp.raise_for_status()
+        articles = news_resp.json().get("articles", [])
+
+        # Run sentiment prediction
+        headlines = [a["title"] for a in articles]
+        sentiments = predictor.predict(headlines)
+
+        # Use actual publishedAt date for 'date' field
+        news_list = [
+            {
+                "title": a["title"],
+                "description": a.get("description", ""),
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "date": a.get("publishedAt", datetime.now(timezone.utc).isoformat()),
+                "sentiment": s
+            }
+            for a, s in zip(articles, sentiments)
+        ]
+        db_set_news(symbol, news_list)
+        cached_news = news_list
+    else:
+        logging.info(f"CACHE HIT: Returning cached data for {symbol}")
+
+    # Filter by sentiment
+    filtered_news = cached_news if sentiment == "all" else [a for a in cached_news if a.get("sentiment") == sentiment]
+
+    return {
+        "symbol": symbol,
+        "data": {
+            "stock_info": cached_stock,
+            "news": filtered_news,  # frontend can filter further by date range
+            "pagination": {
+                "page": 1,
+                "per_page": len(filtered_news),
+                "total_articles": len(filtered_news),
+                "total_pages": 1
+            }
+        }
+    }
+
 
 @app.post("/predict")
 def predict_sentiment(payload: dict):
     headlines = payload.get("headlines", [])
-    sentiments = run_sentiment(headlines)
-    return {"headlines": headlines, "sentiments": sentiments}
+    if not headlines:
+        raise HTTPException(status_code=400, detail="No headlines provided.")
+
+    try:
+        sentiments = predictor.predict(headlines)
+        return {"headlines": headlines, "sentiments": sentiments.tolist()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
