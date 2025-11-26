@@ -1,143 +1,107 @@
 // src/components/Dashboard.tsx
-import React, { useState, useMemo } from "react";
+import React, { useState, useEffect } from "react";
 import { fetchStockData, type StockApiResponse, type NewsArticle } from "../api/stockApi";
 import StockCard from "./StockCard";
 import NewsCard from "./NewsCard";
 
-// Extend NewsArticle to ensure sentiment and date exist
-type NewsWithSentiment = NewsArticle & { sentiment: "positive" | "neutral" | "negative"; date: string };
+interface DashboardProps {
+  symbol: string;
+  range: "1d" | "3d" | "7d" | "30d";
+  fetchTrigger: number;
+}
 
-const Dashboard: React.FC = () => {
-  const [symbol, setSymbol] = useState("");
-  const [stockData, setStockData] = useState<StockApiResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+const Dashboard: React.FC<DashboardProps> = ({ symbol, range, fetchTrigger }) => {
+  const [activeSymbol, setActiveSymbol] = useState<string>(""); // last fetched ticker
+  const [page, setPage] = useState<number>(1);
+  const [perPage] = useState<number>(5);
+  const [data, setData] = useState<StockApiResponse | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Filters
-  const [filter, setFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
-  const [range, setRange] = useState<number>(1); // default 1 day
-
-  // Load stock + news
-  const loadData = async () => {
+  // Fetch stock data
+  const fetchStock = async () => {
     if (!symbol) return;
     setLoading(true);
     setError(null);
+
     try {
-      const data = await fetchStockData(symbol);
-
-      const newsWithSentiment: NewsWithSentiment[] = data.data.news.map((a) => ({
-        ...a,
-        sentiment: (a.sentiment as "positive" | "neutral" | "negative") || "neutral",
-        date: a.date || a.fetched_at,
-      }));
-
-      console.log("[Dashboard] Fetched news:", newsWithSentiment);
-
-      setStockData({
-        ...data,
-        data: {
-          ...data.data,
-          news: newsWithSentiment,
-        },
-      });
-    } catch (err) {
-      setError((err as Error).message);
-      setStockData(null);
+      const response = await fetchStockData(symbol, page, perPage, "all", range);
+      setData(response);
+      setActiveSymbol(symbol);
+    } catch (err: any) {
+      console.error("Error fetching stock data:", err);
+      setError(err.message || "Unknown error");
+      setData(null);
     } finally {
       setLoading(false);
     }
   };
 
-  // Compute filtered articles automatically based on filter + range
-  const filteredArticles = useMemo(() => {
-    if (!stockData) return [];
-
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - range);
-
-    const filtered = stockData.data.news
-      .filter((a) => filter === "all" || a.sentiment === filter)
-      .filter((a) => {
-        const articleDate = new Date(a.date);
-        return !isNaN(articleDate.getTime()) && articleDate >= fromDate;
-      })
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-    console.log("[Dashboard] Filtered articles:", filtered);
-
-    // TEMP: fallback for testing sparklines if empty
-    if (filtered.length === 0 && stockData.data.news.length > 0) {
-      console.warn("[Dashboard] Filtered out all articles, using full news for testing sparklines");
-      return stockData.data.news;
+  // Trigger fetch on button click or range change (if same symbol)
+  useEffect(() => {
+    if (fetchTrigger > 0) {
+      fetchStock();
     }
+  }, [fetchTrigger]);
 
-    return filtered;
-  }, [stockData, filter, range]);
+  useEffect(() => {
+    if (activeSymbol === symbol && activeSymbol !== "") {
+      fetchStock();
+    }
+  }, [range]);
+
+  // Reset pagination when symbol changes
+  useEffect(() => {
+    setPage(1);
+  }, [symbol, range]);
+
+  // Pagination handler
+  const handlePageChange = (newPage: number) => {
+    setPage(newPage);
+    if (activeSymbol === symbol) fetchStock();
+  };
 
   return (
-    <div className="p-6">
-      {/* Input & Fetch */}
-      <div className="mb-4 flex flex-wrap gap-2">
-        <input
-          type="text"
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-          className="border p-2 rounded flex-1 min-w-[200px]"
-          placeholder="Enter stock symbol"
-        />
-        <button
-          onClick={loadData}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
-        >
-          Fetch
-        </button>
-      </div>
+    <div className="p-4">
+      {/* Loading / Error */}
+      {loading && <p>Loading...</p>}
+      {error && <p className="text-red-500">Error: {error}</p>}
 
-      {/* Filters */}
-      {stockData && (
-        <div className="mb-4 flex flex-wrap gap-2 items-center">
-          {(["all", "positive", "neutral", "negative"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1 rounded ${
-                filter === f
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-              }`}
-            >
-              {f.charAt(0).toUpperCase() + f.slice(1)}
-            </button>
-          ))}
-          <select
-            value={range}
-            onChange={(e) => setRange(Number(e.target.value))}
-            className="border px-2 py-1 rounded ml-4"
-          >
-            <option value={1}>1 Day</option>
-            <option value={3}>3 Days</option>
-            <option value={7}>1 Week</option>
-            <option value={14}>2 Weeks</option>
-            <option value={30}>1 Month</option>
-          </select>
+      {/* Stock info */}
+      {data && (
+        <div className="mb-4">
+          <StockCard
+            data={{
+              symbol: data.symbol,
+              current_price: data.current_price,
+              previous_close: data.previous_close,
+              timestamp: data.timestamp,
+            }}
+          />
         </div>
       )}
 
-      {loading && <p>Loading...</p>}
-      {error && <p className="text-red-600">Error: {error}</p>}
+      {/* News feed */}
+      {data && data.results.length > 0 && (
+        <div className="grid gap-4">
+          {data.results.map((article: NewsArticle, idx: number) => (
+            <NewsCard key={idx} article={article} />
+          ))}
+        </div>
+      )}
 
-      {stockData && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <StockCard stock={stockData.data.stock_info} news={filteredArticles} />
-          <div className="flex flex-col">
-            <h2 className="text-xl font-bold mb-2">News</h2>
-            <div className="overflow-y-auto h-[400px] p-2 border rounded bg-gray-50">
-              {filteredArticles.length === 0 && <p>No news available</p>}
-              {filteredArticles.map((article, index) => (
-                <NewsCard key={index} article={article} />
-              ))}
-            </div>
-          </div>
+      {/* Pagination */}
+      {data && data.total_results > perPage && (
+        <div className="flex gap-2 mt-4 justify-center">
+          {Array.from({ length: Math.ceil(data.total_results / perPage) }, (_, i) => i + 1).map((p) => (
+            <button
+              key={p}
+              onClick={() => handlePageChange(p)}
+              className={`px-3 py-1 rounded ${page === p ? "bg-green-500 text-white" : "bg-gray-200"}`}
+            >
+              {p}
+            </button>
+          ))}
         </div>
       )}
     </div>

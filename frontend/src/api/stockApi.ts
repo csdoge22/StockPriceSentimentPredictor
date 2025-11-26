@@ -1,61 +1,59 @@
 // src/api/stockApi.ts
-import axios from "axios";
-
 export interface NewsArticle {
   title: string;
   description: string;
-  fetched_at: string; // when it was fetched
-  sentiment: "positive" | "negative" | "neutral";
-  date: string; // <-- new property for filtering
-}
-
-export interface StockInfo {
-  current_price: number;
-  previous_close: number;
-  timestamp: string;
-  sentiment_scores?: number[];
-}
-
-export interface PaginationInfo {
-  page: number;
-  per_page: number;
-  total_articles: number;
-  total_pages: number;
+  sentiment: string;
+  date: string;
 }
 
 export interface StockApiResponse {
+  results: NewsArticle[];
   symbol: string;
-  data: {
-    stock_info: StockInfo;
-    news: NewsArticle[];
-    pagination: PaginationInfo;
-  };
+  page: number;
+  per_page: number;
+  total_results: number;
+  current_price: number;
+  previous_close: number;
+  timestamp: string;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_BASE = "http://localhost:8000"; // adjust if using a different backend URL
 
-/**
- * Fetch stock info + paginated/filterable news.
- * @param symbol Stock symbol (e.g., "AAPL")
- * @param page Current page number
- * @param perPage Number of articles per page
- * @param sentiment Filter: "all" | "positive" | "negative" | "neutral"
- */
 export const fetchStockData = async (
   symbol: string,
-  page = 1,
-  perPage = 5,
-  sentiment: "all" | "positive" | "negative" | "neutral" = "all"
+  page: number = 1,
+  per_page: number = 5,
+  sentiment: "all" | "positive" | "negative" | "neutral" = "all",
+  range: "1d" | "3d" | "7d" | "30d" = "1d"
 ): Promise<StockApiResponse> => {
-  const params = { page, per_page: perPage, sentiment };
-  const { data } = await axios.get<StockApiResponse>(`${API_BASE}/stock/${symbol}`, { params });
-  return data;
-};
+  const url = `${API_BASE}/stock/${symbol}?page=${page}&per_page=${per_page}&sentiment=${sentiment}&range=${range}`;
 
-/**
- * Send headlines for sentiment prediction
- */
-export const predictSentiment = async (headlines: string[]): Promise<string[]> => {
-  const { data } = await axios.post(`${API_BASE}/predict`, { headlines });
-  return data.sentiments;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Error fetching stock data: ${res.statusText}`);
+  }
+
+  const data = await res.json();
+
+  // Ensure all fields exist to satisfy TypeScript
+  const stockData: StockApiResponse = {
+    symbol: data.symbol ?? symbol,
+    page: data.page ?? page,
+    per_page: data.per_page ?? per_page,
+    total_results: data.total_results ?? (data.results?.length ?? 0),
+    current_price: data.current_price ?? 0,
+    previous_close: data.previous_close ?? 0,
+    timestamp: data.timestamp ?? new Date().toISOString(),
+    results: Array.isArray(data.results)
+      ? data.results.map((a: any) => ({
+          title: a.title ?? "No title",
+          description: a.description ?? "No description",
+          sentiment: a.sentiment ?? "neutral",
+          date: a.date ?? new Date().toISOString(),
+        }))
+      : [],
+  };
+
+  return stockData;
 };

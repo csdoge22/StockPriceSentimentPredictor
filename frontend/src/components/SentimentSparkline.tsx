@@ -8,10 +8,7 @@ export interface SentimentSparklineProps {
 }
 
 const SentimentSparkline: React.FC<SentimentSparklineProps> = ({ data, label }) => {
-  const color =
-    label === "positive" ? "green" : label === "neutral" ? "gray" : "red";
-
-  console.log("[SentimentSparkline] label:", label, data);
+  const color = label === "positive" ? "green" : label === "neutral" ? "gray" : "red";
 
   return (
     <div className="flex flex-col items-center">
